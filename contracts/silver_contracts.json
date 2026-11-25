@@ -1,0 +1,942 @@
+{
+  "version": 1,
+  "notes": [
+    "One contract per source. Silver reads this file to cast, validate, dedupe and route bad rows to quarantine.",
+    "Bronze keeps raw values as received (mostly text from Copy); every cast happens in Silver.",
+    "Check actions: 'quarantine' = row goes to slv_quarantine with the reason code and is excluded from the Silver table; 'warn' = row stays in Silver and the failure is counted in the run log.",
+    "Allowed values come from the data generator (nb_generate_data.py). Nullability marked true where the generator allows nulls or where unsure; review those.",
+    "Reason codes: NULL_KEY, DUPLICATE, INVALID_VALUE, FK_MISSING, CAST_FAILED.",
+    "A check with an 'expr' field is a Spark SQL expression that must be TRUE for a valid row; it runs on the typed (post-cast) columns. Checks without 'expr' are enforced generically from the column definitions (nullability, allowed_values, cast) and the primary key, or are cross-table (FK) checks added later."
+  ],
+  "audit_columns": [
+    {
+      "name": "_batch_id",
+      "type": "string"
+    },
+    {
+      "name": "_ingested_at",
+      "type": "timestamp"
+    }
+  ],
+  "sources": {
+    "accounts": {
+      "bronze_table": "brz_accounts",
+      "silver_table": "slv_accounts",
+      "primary_key": [
+        "account_id",
+        "snapshot_date"
+      ],
+      "columns": [
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "account_name",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "industry",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "Retail",
+            "Finance",
+            "Healthcare",
+            "Manufacturing",
+            "Media",
+            "Logistics",
+            "Education"
+          ]
+        },
+        {
+          "name": "country",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "CA",
+            "US",
+            "UK",
+            "DE",
+            "AU",
+            "IN"
+          ]
+        },
+        {
+          "name": "tier",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "Free",
+            "Pro",
+            "Enterprise"
+          ]
+        },
+        {
+          "name": "account_status",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "active",
+            "churned",
+            "trial",
+            "free"
+          ]
+        },
+        {
+          "name": "owner",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "owner_a",
+            "owner_b",
+            "owner_c",
+            "owner_d",
+            "owner_e"
+          ]
+        },
+        {
+          "name": "created_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "acquisition_campaign_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "snapshot_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "account_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per (account_id, snapshot_date); keep latest _ingested_at",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "created_date, updated_at, snapshot_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "industry, country, tier, account_status, owner in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "campaign_exists",
+          "rule": "acquisition_campaign_id exists in campaigns when not null",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ]
+    },
+    "contacts": {
+      "bronze_table": "brz_contacts",
+      "silver_table": "slv_contacts",
+      "primary_key": [
+        "contact_id",
+        "snapshot_date"
+      ],
+      "columns": [
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "contact_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "job_role",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "Admin",
+            "Analyst",
+            "Engineer",
+            "Executive",
+            "Finance"
+          ]
+        },
+        {
+          "name": "created_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "snapshot_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "contact_id IS NOT NULL AND account_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per (contact_id, snapshot_date); keep latest _ingested_at",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "created_date, snapshot_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "job_role in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "account_exists",
+          "rule": "account_id exists in accounts",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ]
+    },
+    "opportunities": {
+      "bronze_table": "brz_opportunities",
+      "silver_table": "slv_opportunities",
+      "primary_key": [
+        "opportunity_id",
+        "snapshot_date"
+      ],
+      "columns": [
+        {
+          "name": "opportunity_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "stage",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "Prospect",
+            "Qualified",
+            "Proposal",
+            "Closed Won",
+            "Closed Lost"
+          ]
+        },
+        {
+          "name": "amount",
+          "type": "decimal(18,2)",
+          "nullable": false
+        },
+        {
+          "name": "close_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "created_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "opportunity_type",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "new",
+            "expansion"
+          ]
+        },
+        {
+          "name": "snapshot_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "opportunity_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per (opportunity_id, snapshot_date); keep latest _ingested_at",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "amount, close_date, created_date, snapshot_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "amount_positive",
+          "rule": "amount > 0 (generator plants about 1% negative amounts)",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE",
+          "expr": "amount > 0"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "stage, opportunity_type in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "date_order",
+          "rule": "created_date <= close_date",
+          "action": "warn",
+          "reason": "INVALID_VALUE",
+          "expr": "created_date <= close_date"
+        },
+        {
+          "name": "account_exists",
+          "rule": "account_id exists in accounts",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ]
+    },
+    "campaigns": {
+      "bronze_table": "brz_campaigns",
+      "silver_table": "slv_campaigns",
+      "primary_key": [
+        "campaign_id"
+      ],
+      "columns": [
+        {
+          "name": "campaign_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "channel",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "Paid Search",
+            "Social",
+            "Email",
+            "Webinar",
+            "Organic",
+            "Partner"
+          ]
+        },
+        {
+          "name": "campaign_name",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "nullable": true
+        },
+        {
+          "name": "budget",
+          "type": "decimal(18,2)",
+          "nullable": true
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "campaign_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per campaign_id; keep latest _ingested_at",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "start_date, end_date, budget cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "channel in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "date_order",
+          "rule": "start_date <= end_date when end_date is not null",
+          "action": "warn",
+          "reason": "INVALID_VALUE",
+          "expr": "end_date IS NULL OR start_date <= end_date"
+        }
+      ]
+    },
+    "ad_spend": {
+      "bronze_table": "brz_ad_spend",
+      "silver_table": "slv_ad_spend",
+      "primary_key": [
+        "campaign_id",
+        "spend_date"
+      ],
+      "columns": [
+        {
+          "name": "campaign_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "spend",
+          "type": "decimal(18,2)",
+          "nullable": false
+        },
+        {
+          "name": "impressions",
+          "type": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "clicks",
+          "type": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "spend_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "campaign_id IS NOT NULL AND spend_date IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per (campaign_id, spend_date); keep latest _ingested_at",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "spend, impressions, clicks, spend_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "non_negative",
+          "rule": "spend >= 0 AND impressions >= 0 AND clicks >= 0",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE",
+          "expr": "spend >= 0 AND impressions >= 0 AND clicks >= 0"
+        },
+        {
+          "name": "clicks_le_impressions",
+          "rule": "clicks <= impressions",
+          "action": "warn",
+          "reason": "INVALID_VALUE",
+          "expr": "clicks <= impressions"
+        },
+        {
+          "name": "campaign_exists",
+          "rule": "campaign_id exists in campaigns",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ]
+    },
+    "subscriptions": {
+      "bronze_table": "brz_subscriptions",
+      "silver_table": "slv_subscriptions",
+      "primary_key": [
+        "subscription_id"
+      ],
+      "dedupe_order_by": "modified_at",
+      "columns": [
+        {
+          "name": "subscription_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "plan",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "Starter",
+            "Team",
+            "Business",
+            "Enterprise"
+          ]
+        },
+        {
+          "name": "seats",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "billing_cadence",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "annual",
+            "monthly"
+          ]
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "active",
+            "cancelled"
+          ]
+        },
+        {
+          "name": "modified_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "last_change_type",
+          "type": "string",
+          "nullable": true,
+          "allowed_values": [
+            "expansion",
+            "upgrade",
+            "contraction"
+          ]
+        },
+        {
+          "name": "last_change_date",
+          "type": "date",
+          "nullable": true
+        },
+        {
+          "name": "extract_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "subscription_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per subscription_id; keep latest modified_at (incremental extracts re-send rows)",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "seats, start_date, modified_at, last_change_date, extract_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "seats_positive",
+          "rule": "seats > 0",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE",
+          "expr": "seats > 0"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "plan, billing_cadence, status, last_change_type in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "account_exists",
+          "rule": "account_id exists in accounts",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ]
+    },
+    "invoices": {
+      "bronze_table": "brz_invoices",
+      "silver_table": "slv_invoices",
+      "child_table": "slv_invoice_lines",
+      "primary_key": [
+        "invoice_id"
+      ],
+      "dedupe_order_by": "modified_at",
+      "columns": [
+        {
+          "name": "invoice_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "subscription_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "currency",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "USD"
+          ]
+        },
+        {
+          "name": "invoice_date",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "period_start",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "period_end",
+          "type": "date",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "paid",
+            "past_due",
+            "void",
+            "open"
+          ]
+        },
+        {
+          "name": "total_amount",
+          "type": "decimal(18,2)",
+          "nullable": false
+        },
+        {
+          "name": "modified_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "extract_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "invoice_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per invoice_id; keep latest modified_at (incremental extract re-sends about 1% of rows)",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "dates, modified_at, total_amount cast without error (total_amount is float in Bronze; cast to decimal)",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "total_non_negative",
+          "rule": "total_amount >= 0",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE",
+          "expr": "total_amount >= 0"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "currency, status in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "period_order",
+          "rule": "period_start <= period_end",
+          "action": "warn",
+          "reason": "INVALID_VALUE",
+          "expr": "period_start <= period_end"
+        },
+        {
+          "name": "subscription_exists",
+          "rule": "subscription_id exists in subscriptions",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        },
+        {
+          "name": "line_amount_matches_quantity",
+          "rule": "on slv_invoice_lines: quantity * unit price = amount (generator plants about 0.5% bad lines)",
+          "action": "warn",
+          "reason": "INVALID_VALUE"
+        }
+      ],
+      "assumption": "Bronze invoices also carries a nested 'lines' array (not visible in the SQL endpoint); Silver explodes it into slv_invoice_lines. Confirm its field names when building."
+    },
+    "usage_events": {
+      "bronze_table": "brz_usage_events",
+      "silver_table": "slv_usage_events",
+      "primary_key": [
+        "event_id"
+      ],
+      "dedupe_order_by": "_ingested_at",
+      "columns": [
+        {
+          "name": "event_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "user_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "event_type",
+          "type": "string",
+          "nullable": false,
+          "allowed_values": [
+            "query_run",
+            "dashboard_view",
+            "export",
+            "api_call",
+            "ai_prompt"
+          ]
+        },
+        {
+          "name": "quantity",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "event_ts",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "ingest_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "derived_columns": [
+        {
+          "name": "is_late",
+          "type": "boolean",
+          "rule": "event_ts < ingest_date (event arrived after its own day; about 2% planted)"
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "event_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "account_not_null",
+          "rule": "account_id IS NOT NULL (about 0.5% planted missing)",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per event_id (about 1% delivered twice)",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "quantity, event_ts, ingest_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "quantity_positive",
+          "rule": "quantity > 0 (about 0.2% planted as -1)",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE",
+          "expr": "quantity > 0"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "event_type in allowed_values",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "account_exists",
+          "rule": "account_id exists in accounts",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ]
+    },
+    "web_sessions": {
+      "bronze_table": "brz_web_sessions",
+      "silver_table": "slv_web_sessions",
+      "primary_key": [
+        "session_id"
+      ],
+      "dedupe_order_by": "_ingested_at",
+      "columns": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "utm_campaign",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "country",
+          "type": "string",
+          "nullable": true,
+          "allowed_values": [
+            "CA",
+            "US",
+            "UK",
+            "DE",
+            "AU",
+            "IN"
+          ]
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "pages_viewed",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "session_date",
+          "type": "date",
+          "nullable": false
+        }
+      ],
+      "checks": [
+        {
+          "name": "key_not_null",
+          "rule": "session_id IS NOT NULL",
+          "action": "quarantine",
+          "reason": "NULL_KEY"
+        },
+        {
+          "name": "no_duplicate_key",
+          "rule": "one row per session_id",
+          "action": "quarantine",
+          "reason": "DUPLICATE"
+        },
+        {
+          "name": "cast_ok",
+          "rule": "pages_viewed, session_date cast without error",
+          "action": "quarantine",
+          "reason": "CAST_FAILED"
+        },
+        {
+          "name": "pages_non_negative",
+          "rule": "pages_viewed >= 0",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE",
+          "expr": "pages_viewed >= 0"
+        },
+        {
+          "name": "allowed_values",
+          "rule": "country in allowed_values when not null",
+          "action": "quarantine",
+          "reason": "INVALID_VALUE"
+        },
+        {
+          "name": "campaign_exists",
+          "rule": "utm_campaign exists in campaigns when not null",
+          "action": "warn",
+          "reason": "FK_MISSING"
+        }
+      ],
+      "known_issues": [
+        "account_id is null on anonymous sessions by design (about 70%); this is not an error.",
+        "One day's file has 'geo' instead of 'country' plus a 'device_type' column (schema drift). Bronze reads CSV by position, so Silver must detect and handle it; handling is still to be decided."
+      ]
+    }
+  }
+}
