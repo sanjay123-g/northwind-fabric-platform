@@ -39,8 +39,46 @@ A single pipeline, `pl_bronze_ingest`, reads a control table and loops over it:
 
 ### Status
 - All nine Bronze tables load through the pipeline; the last full run succeeded for all nine sources with nine `Succeeded` rows in `ctl.run_log`.
-- Audit columns confirmed on all nine tables. `_batch_id` shows the pipeline run ID on the Copy-route tables; the two notebook tables still need one pipeline rerun to confirm the run ID (the parameter cell was only tagged after the last run).
+- Audit columns confirmed on all nine tables. `_batch_id` shows the pipeline run ID (a GUID) on every table, including the two notebook-loaded tables, after the parameter cell was tagged and the pipeline rerun.
 - Not yet built: watermark updates, Overwrite to incremental load, handling of the one `web_sessions` file with a drifted schema, and a run-level failure alert (planned for the orchestration phase).
 
 ### Skills demonstrated
 Metadata-driven pipeline design, Fabric Data Factory (Lookup, ForEach, Switch, Copy, Notebook, Stored procedure, Fail, dynamic expressions, retries), Hive-style partition handling, T-SQL control tables and stored procedures in a Fabric warehouse, Spark capacity behaviour, and working from the platform docs to find limits before designing around them.
+
+---
+
+## Phase 4: Silver engineering framework
+
+### What it does
+Turns raw Bronze into typed, validated, deduplicated Silver tables, and keeps every rejected row in a quarantine table with a reason code. One shared helper module and one data contract per source drive all nine tables, so the same code handles every source.
+
+### Design decisions
+- **Data contracts.** `contracts/silver_contracts.json` defines, per source: columns and types, primary key, allowed values, and checks with an action (`quarantine` or `warn`). Silver reads the contract, so adding a rule is a config change, not a code change.
+- **Cast and validate in Silver, not Bronze.** Bronze stays raw and replayable (mostly text from Copy). `try_cast` turns a bad value into NULL instead of failing the job, and the original row is kept as JSON in quarantine for traceability and lineage.
+- **Quarantine instead of drop.** Each rejected row carries a reason code (`NULL_KEY`, `DUPLICATE`, `INVALID_VALUE`, `FK_MISSING`, `CAST_FAILED`). Duplicates keep the newest row.
+- **Reconcile every load.** Rows in Bronze must equal valid rows plus quarantined rows. The result is saved per source in `slv_load_audit`.
+- **Idempotent writes with Delta MERGE on the primary key.** Reruns give the same result. Append would duplicate on a retry; overwrite breaks once a batch is partial; delete-then-insert is not atomic. Log tables (`slv_load_audit`, `slv_dq_results`) append on purpose because each run is a new fact.
+- **Invoice lines.** The nested `lines` array in invoices is exploded into `slv_invoice_lines` (key `invoice_id` + `line_id`), using the newest copy of each invoice and only validated invoices.
+- **SCD type 2 for accounts.** `slv_account_history` keeps every version of an account with `valid_from`, `valid_to`, `is_current`. A new version starts only when tier, status or owner changes (detected with a row hash against the previous snapshot). Country and industry never changed in the data, so they are not tracked. Rebuilt in full from the retained snapshots with window functions, which is idempotent and simple at this size; a large dimension or a change-only feed would use an incremental MERGE instead.
+- **Referential checks.** Orphan counts for 8 parent-child relationships are saved per run in `slv_dq_results`.
+- **Maintenance.** OPTIMIZE runs on every Silver table at the end of the load. VACUUM stays at the 7-day default, per Microsoft's guidance on shorter retention affecting time travel and concurrent readers.
+
+### Results (first full load)
+- All nine sources balanced (rows in = valid + quarantined). The packaged `nb_silver_load` notebook ran end to end and its final check passed.
+- Seeded dirty data caught: `usage_events` 82,946 of 4,921,393 rows quarantined (24,718 null key, 48,409 duplicates, 9,819 invalid values); `invoices` 1,109 duplicates; `subscriptions` 727 duplicates; `opportunities` 362 invalid values.
+- `slv_invoice_lines`: 52,712 rows; rerunning gives the same count.
+- Referential checks: 0 orphans across all 8 relationships.
+- SCD2: 21,621 version rows for 20,000 accounts (20,000 current); 1,621 accounts have more than one version.
+- Late-arriving events: 96,360 of 4,838,447 usage events (about 2%) arrived 1 to 5 days late.
+- OPTIMIZE compacted `slv_usage_events` from 9 files to 1.
+- Partition test: partitioning a copy of `slv_usage_events` by `ingest_date` produced 362 files instead of 1 and a one-day query of 0.39 s vs 0.48 s, within noise at 85 MB. Decision: leave it unpartitioned and revisit if the table grows to hundreds of GB.
+
+### Problems found and how they were solved
+- **Wrong reason code for missing keys.** A required `_id` column that was NULL was reported as `INVALID_VALUE`. Found by the local test suite; fixed so required id columns report `NULL_KEY`.
+- **Misread VACUUM dry run.** Counting the rows of `VACUUM ... DRY RUN` returned 1, which looked like one file to delete. Listing the output showed it was the table's metadata folder, so there were no old data files.
+- **Silver tables landing in the Bronze lakehouse.** The notebook's default lakehouse is `lh_bronze`, so Silver tables were created there. Noted as a design point to resolve (see status).
+
+### Status
+- Done: contracts, shared helper module, quarantine, reconciliation, idempotent MERGE for all nine sources, invoice lines, SCD2 accounts, referential checks, OPTIMIZE, partition test, packaged framework notebook.
+- Open decisions (not decided yet): late-arriving data policy (flag only, reprocessing window, or cut-off), Bronze Overwrite vs Append (blocks the watermark and incremental load), and whether Silver gets its own lakehouse.
+- Not yet built: watermark and incremental load, handling of the `web_sessions` schema-drift file, pipeline orchestration of the Silver notebook.
