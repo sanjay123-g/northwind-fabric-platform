@@ -76,9 +76,16 @@ Turns raw Bronze into typed, validated, deduplicated Silver tables, and keeps ev
 ### Problems found and how they were solved
 - **Wrong reason code for missing keys.** A required `_id` column that was NULL was reported as `INVALID_VALUE`. Found by the local test suite; fixed so required id columns report `NULL_KEY`.
 - **Misread VACUUM dry run.** Counting the rows of `VACUUM ... DRY RUN` returned 1, which looked like one file to delete. Listing the output showed it was the table's metadata folder, so there were no old data files.
-- **Silver tables landing in the Bronze lakehouse.** The notebook's default lakehouse is `lh_bronze`, so Silver tables were created there. Noted as a design point to resolve (see status).
+- **Silver tables landing in the Bronze lakehouse.** The notebook's default lakehouse was `lh_bronze`, so Silver tables were created there. Resolved: Silver now has its own lakehouse, `lh_silver` (see below).
 
 ### Status
 - Done: contracts, shared helper module, quarantine, reconciliation, idempotent MERGE for all nine sources, invoice lines, SCD2 accounts, referential checks, OPTIMIZE, partition test, packaged framework notebook.
-- Open decisions (not decided yet): late-arriving data policy (flag only, reprocessing window, or cut-off), Bronze Overwrite vs Append (blocks the watermark and incremental load), and whether Silver gets its own lakehouse.
-- Not yet built: watermark and incremental load, handling of the `web_sessions` schema-drift file, pipeline orchestration of the Silver notebook.
+- Open decisions (not decided yet): late-arriving data policy (flag only, reprocessing window, or cut-off), Bronze Overwrite vs Append (blocks the watermark and incremental load), and the `web_sessions` schema-drift policy. Decided: Silver gets its own lakehouse (below).
+- Pipeline orchestration done: `pl_bronze_ingest` runs `nb_silver_load` after Bronze ingestion, passing the pipeline run ID as `batch_id`.
+- Not yet built: watermark and incremental load, handling of the `web_sessions` schema-drift file.
+
+### Layer separation: Silver in its own lakehouse
+- **Layout:** `lh_bronze` (raw), `lh_silver` (clean), `wh_gold` (warehouse for modeled data). This follows Microsoft's medallion guidance of lakehouses for Bronze and Silver and a warehouse for Gold. A single lakehouse with schemas is also a documented option, but separate items give each layer its own boundary for access control and clear lineage.
+- **Cross-lakehouse read:** a Spark notebook reads tables from its default lakehouse only. `nb_silver_load` has `lh_silver` as default and reads Bronze through its OneLake path (`abfss://<workspace id>@onelake.dfs.fabric.microsoft.com/<lakehouse id>/Tables/dbo/<table>`) via a small `bronze()` helper, rather than relying on cross-lakehouse default-lakehouse behavior.
+- **Config files** (`silver_contracts.json`, `silver_helpers.py`) live in `lh_silver` Files/config, because `/lakehouse/default` points at the default lakehouse.
+- **Verified:** after the move, all nine sources loaded and balanced with identical counts, and 14 `slv_*` tables exist in `lh_silver`.
